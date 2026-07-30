@@ -13,10 +13,46 @@ uniform vec2 uPointerVelocity;
 uniform vec4 uRect;
 uniform float uRadius;
 
+/* device-пикселей на один CSS-пиксель */
+uniform float uPixelScale;
+
 uniform float uRefraction;
 uniform float uGlassEnabled;
 
 out vec4 outColor;
+
+/*
+ * Геометрия задана в CSS-пикселях и домножается на uPixelScale,
+ * иначе на retina все пороги оказываются вдвое уже.
+ */
+const float BEVEL_WIDTH_CSS = 28.0;
+const float SHADOW_RADIUS_CSS = 48.0;
+const float EDGE_BOOST_WIDTH_CSS = 48.0;
+const float EDGE_BOOST_FEATHER_CSS = 2.0;
+const float RIM_WIDTH_CSS = 8.0;
+
+/* Тюнинг эффекта */
+const float DISPERSION_RED = 1.060;
+const float DISPERSION_BLUE = 0.940;
+
+const float FROSTED_BASE = 0.40;
+const float FROSTED_IN_WAKE = 0.26;
+
+const float SHADOW_OPACITY = 0.32;
+
+const vec3 TINT_COLOR = vec3(0.82, 0.91, 1.0);
+const float TINT_AMOUNT = 0.10;
+
+const vec3 RIM_COLOR = vec3(1.0, 0.985, 0.96);
+const float RIM_INTENSITY = 0.22;
+
+const vec3 FRESNEL_COLOR = vec3(0.58, 0.82, 1.0);
+const float FRESNEL_INTENSITY = 0.24;
+
+const float SPECULAR_INTENSITY = 0.34;
+
+const vec2 WAKE_ANISOTROPY = vec2(1.40, 0.95);
+const float WAKE_CLAMP = 0.030;
 
 float sdRoundRect(vec2 point, vec2 halfSize, float radius) {
   vec2 q = abs(point) - halfSize + radius;
@@ -26,78 +62,58 @@ float sdRoundRect(vec2 point, vec2 halfSize, float radius) {
     - radius;
 }
 
-float surfaceHeight(
+/*
+ * Профиль фаски, параметризованный расстоянием до границы SDF:
+ * t = 0 у самой кромки, t = 1 в толще стекла. Направление "наружу"
+ * берётся из градиента SDF центральными разностями.
+ */
+vec3 glassNormal(
   vec2 localPoint,
   vec2 halfSize,
-  float radius
+  float radius,
+  float bevelWidth
 ) {
-  float distanceToShape = sdRoundRect(
-    localPoint,
-    halfSize,
-    radius
+  float distanceToShape = sdRoundRect(localPoint, halfSize, radius);
+
+  float t = clamp(-distanceToShape / bevelWidth, 0.0, 1.0);
+  float dome = t * (2.0 - t);
+
+  float nz = sqrt(max(dome, 0.0));
+  float nxy = sqrt(max(1.0 - dome, 0.0));
+
+  float epsilon = uPixelScale;
+
+  vec2 grad = vec2(
+    sdRoundRect(localPoint + vec2(epsilon, 0.0), halfSize, radius)
+      - sdRoundRect(localPoint - vec2(epsilon, 0.0), halfSize, radius),
+    sdRoundRect(localPoint + vec2(0.0, epsilon), halfSize, radius)
+      - sdRoundRect(localPoint - vec2(0.0, epsilon), halfSize, radius)
   );
 
-  float minSize = min(halfSize.x, halfSize.y);
+  float gradLength = max(length(grad), 1e-4);
 
-  float core = 1.0 - smoothstep(
-    -minSize * 0.88,
-    0.0,
-    distanceToShape
-  );
-
-  float bevel = 1.0 - smoothstep(
-    -28.0,
-    3.0,
-    distanceToShape
-  );
-
-  return core * 0.16 + bevel * 0.84;
-}
-
-vec3 surfaceNormal(
-  vec2 localPoint,
-  vec2 halfSize,
-  float radius
-) {
-  const float EPSILON = 1.0;
-
-  float heightCenter = surfaceHeight(
-    localPoint,
-    halfSize,
-    radius
-  );
-
-  float heightX = surfaceHeight(
-    localPoint + vec2(EPSILON, 0.0),
-    halfSize,
-    radius
-  );
-
-  float heightY = surfaceHeight(
-    localPoint + vec2(0.0, EPSILON),
-    halfSize,
-    radius
-  );
-
-  return normalize(vec3(
-    -(heightX - heightCenter),
-    -(heightY - heightCenter),
-    0.15
-  ));
+  return vec3(-(grad / gradLength) * nxy, nz);
 }
 
 void main() {
-  vec3 background = texture(uBackground, vUv).rgb;
+  vec3 background = textureLod(uBackground, vUv, 0.0).rgb;
 
   vec2 pixel = vUv * uResolution;
 
   vec2 local = pixel - uRect.xy - uRect.zw * 0.5;
   vec2 halfSize = uRect.zw * 0.5;
 
+  float minSize = min(halfSize.x, halfSize.y);
+
+  /* Защита от вырожденной геометрии: радиус не может превышать полуразмер */
+  float safeRadius = min(uRadius, minSize);
+
+  float bevelWidth = max(BEVEL_WIDTH_CSS * uPixelScale, 1.0);
+
   float distanceToShape = sdRoundRect(
     local,
     halfSize,
-    uRadius
+    safeRadius
   );
 
   float antiAlias = max(
@@ -115,22 +131,21 @@ void main() {
 
   float shadow = 1.0 - smoothstep(
     0.0,
-    48.0,
+    SHADOW_RADIUS_CSS * uPixelScale,
     outsideDistance
   );
 
-  shadow *= (1.0 - glassMask) * 0.32;
+  shadow *= (1.0 - glassMask) * SHADOW_OPACITY;
 
   vec3 color = background * (1.0 - shadow);
 
   if (glassMask > 0.001) {
-    vec3 normal = surfaceNormal(
+    vec3 normal = glassNormal(
       local,
       halfSize,
-      uRadius
+      safeRadius,
+      bevelWidth
     );
-
-    float minSize = min(halfSize.x, halfSize.y);
 
     float edgeThickness = smoothstep(
       -minSize * 0.82,
@@ -139,8 +154,8 @@ void main() {
     );
 
     float edgeBoost = smoothstep(
-      -48.0,
-      2.0,
+      -EDGE_BOOST_WIDTH_CSS * uPixelScale,
+      EDGE_BOOST_FEATHER_CSS * uPixelScale,
       distanceToShape
     );
 
@@ -176,73 +191,53 @@ void main() {
       pointerDistance
     );
 
-    /*
- * Данные приходят в UV/c; ограничение защищает края texture.
- * 0.030 заметно на фоне с цветными blobs, но UV остаются
- * внутри clamp() ниже.
- */
-vec2 wakeDirection = clamp(
-  uPointerVelocity * vec2(1.40, 0.95),
-  vec2(-0.030),
-  vec2(0.030)
-);
-
-/*
- * В центре follow-through сильнее, у bevel сохраняется
- * базовая normal refraction.
- */
-vec2 liquidWake = wakeDirection
-  * wakeMask
-  * (0.55 + edgeThickness * 0.45);
-
-    vec2 offset = baseOffset + liquidWake;
+    /* Данные приходят в UV/c, ограничение держит смещение в разумных рамках */
+    vec2 wakeDirection = clamp(
+      uPointerVelocity * WAKE_ANISOTROPY,
+      vec2(-WAKE_CLAMP),
+      vec2(WAKE_CLAMP)
+    );
 
     /*
-     * RGB-dispersion применяется только к sharp texture.
+     * В центре follow-through сильнее, у bevel сохраняется
+     * базовая normal refraction.
      */
-    vec2 uvRed = clamp(
-      vUv + offset * 1.060,
-      vec2(0.001),
-      vec2(0.999)
-    );
+    vec2 liquidWake = wakeDirection
+      * wakeMask
+      * (0.55 + edgeThickness * 0.45);
 
-    vec2 uvGreen = clamp(
-      vUv + offset,
-      vec2(0.001),
-      vec2(0.999)
-    );
+    /*
+     * Смещение живёт в UV, поэтому на неквадратном экране его надо
+     * сжать по X — иначе преломление растянуто по одной оси.
+     */
+    float aspect = uResolution.x / uResolution.y;
+    vec2 uvScale = vec2(1.0 / aspect, 1.0);
 
-    vec2 uvBlue = clamp(
-      vUv + offset * 0.940,
-      vec2(0.001),
-      vec2(0.999)
-    );
+    vec2 offset = (baseOffset + liquidWake) * uvScale;
 
+    /* Текстуры используют CLAMP_TO_EDGE, дополнительный clamp() не нужен */
     vec3 refractedSharp = vec3(
-      texture(uBackground, uvRed).r,
-      texture(uBackground, uvGreen).g,
-      texture(uBackground, uvBlue).b
+      textureLod(uBackground, vUv + offset * DISPERSION_RED, 0.0).r,
+      textureLod(uBackground, vUv + offset, 0.0).g,
+      textureLod(uBackground, vUv + offset * DISPERSION_BLUE, 0.0).b
     );
 
     /*
-     * Blur texture читается только по vUv.
-     * Не применять offset к uBlurredBackground.
+     * Blur читается по тому же offset, что и sharp: иначе матовая
+     * составляющая "не едет" вместе с искажением.
      */
-    vec3 refractedBlurred = texture(
+    vec3 refractedBlurred = textureLod(
       uBlurredBackground,
-      vUv
+      vUv + offset,
+      0.0
     ).rgb;
 
-    /*
-    * Меньше blur точно в области волны:
-    * sharp distortion становится заметна, но не меняет
-    * sampling blur texture.
-    */
-   float frostedMix = mix(
-     0.62,
-     0.26,
-     wakeMask
-   );
+    /* В зоне волны матовость ослабевает, чтобы искажение читалось */
+    float frostedMix = mix(
+      FROSTED_BASE,
+      FROSTED_IN_WAKE,
+      wakeMask
+    );
 
     vec3 refracted = mix(
       refractedSharp,
@@ -252,19 +247,17 @@ vec2 liquidWake = wakeDirection
 
     vec3 glassColor = mix(
       refracted,
-      vec3(0.82, 0.91, 1.0),
-      0.10
+      TINT_COLOR,
+      TINT_AMOUNT
     );
 
     float rim = 1.0 - smoothstep(
       0.0,
-      8.0,
+      RIM_WIDTH_CSS * uPixelScale,
       abs(distanceToShape)
     );
 
-    glassColor += vec3(1.0, 0.985, 0.96)
-      * rim
-      * 0.22;
+    glassColor += RIM_COLOR * rim * RIM_INTENSITY;
 
     /*
      * Polynomial Fresnel:
@@ -276,18 +269,12 @@ vec2 liquidWake = wakeDirection
     float fresnel = grazingAngle * grazingAngle;
     fresnel *= fresnel;
 
-    glassColor += vec3(0.58, 0.82, 1.0)
-      * fresnel
-      * 0.24;
+    glassColor += FRESNEL_COLOR * fresnel * FRESNEL_INTENSITY;
 
     /*
      * Pointer highlight без exp(), pow() и normalize().
      */
-    vec2 normalizedDistance = (local - pointerLocal)
-      / max(halfSize, vec2(1.0));
-
-    vec2 stretchedDistance = normalizedDistance
-      * vec2(0.72, 1.28);
+    vec2 stretchedDistance = localToPointer * vec2(0.72, 1.28);
 
     float highlightDistance = dot(
       stretchedDistance,
@@ -309,9 +296,7 @@ vec2 liquidWake = wakeDirection
     float specular = pointerHighlight
       * (0.18 + edgeLight * 0.82);
 
-    glassColor += vec3(1.0, 0.985, 0.96)
-      * specular
-      * 0.34;
+    glassColor += RIM_COLOR * specular * SPECULAR_INTENSITY;
 
     glassColor = clamp(glassColor, 0.0, 1.0);
 

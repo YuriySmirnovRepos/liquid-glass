@@ -178,6 +178,7 @@ function render(now) {
       pointer: state.pointer,
       rect,
       radius,
+      pixelScale: state.dpr,
       refraction: state.refraction,
       glassEnabled: state.glassEnabled,
     });

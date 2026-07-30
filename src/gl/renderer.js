@@ -142,6 +142,7 @@ export class LiquidGlassRenderer {
         ),
         rect: gl.getUniformLocation(this.glassProgram, "uRect"),
         radius: gl.getUniformLocation(this.glassProgram, "uRadius"),
+        pixelScale: gl.getUniformLocation(this.glassProgram, "uPixelScale"),
         refraction: gl.getUniformLocation(this.glassProgram, "uRefraction"),
         enabled: gl.getUniformLocation(this.glassProgram, "uGlassEnabled"),
       },
@@ -234,6 +235,7 @@ export class LiquidGlassRenderer {
     pointer,
     rect,
     radius,
+    pixelScale,
     refraction,
     glassEnabled,
   }) {
@@ -269,6 +271,7 @@ export class LiquidGlassRenderer {
       rect.height
     );
     gl.uniform1f(this.uniforms.glass.radius, radius);
+    gl.uniform1f(this.uniforms.glass.pixelScale, pixelScale);
     gl.uniform1f(this.uniforms.glass.refraction, refraction);
     gl.uniform1f(this.uniforms.glass.enabled, glassEnabled);
 
