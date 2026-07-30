@@ -3,9 +3,27 @@ import "./style.css";
 import { LiquidGlassRenderer } from "./gl/renderer.js";
 
 const canvas = document.querySelector("#liquid-canvas");
-const status = document.querySelector("#status");
+const statusElement = document.querySelector("#status");
+const fpsElement = document.querySelector("#fps");
 const testButton = document.querySelector("#test-button");
 const glassCard = document.querySelector(".glass-card");
+
+// Живёт на уровне модуля: matchMedia() в каждом кадре — лишняя работа.
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+/*
+ * Live-регион: сюда пишутся только значимые события (готовность,
+ * потеря/восстановление контекста, ошибки), но не телеметрия.
+ */
+function setStatus(message) {
+  statusElement.textContent = message;
+}
+
+function reportFatal(message, error) {
+  console.error(message, error);
+  setStatus(message);
+  document.body.classList.add("webgl-unavailable");
+}
 
 const gl = canvas.getContext("webgl2", {
   alpha: false,
@@ -16,12 +34,17 @@ const gl = canvas.getContext("webgl2", {
 });
 
 if (!gl) {
-  status.textContent = "WebGL2 недоступен";
-  document.body.classList.add("webgl-unavailable");
+  reportFatal("WebGL2 недоступен");
   throw new Error("WebGL2 is not available");
 }
 
-const renderer = new LiquidGlassRenderer(gl);
+let renderer = null;
+
+try {
+  renderer = new LiquidGlassRenderer(gl);
+} catch (error) {
+  reportFatal(`Не удалось инициализировать WebGL: ${error.message}`, error);
+}
 
 const state = {
   dpr: Math.min(window.devicePixelRatio || 1, 1.5),
@@ -42,6 +65,7 @@ const state = {
   glassEnabled: 1.0,
   hidden: document.hidden,
   lastFrameTime: performance.now(),
+  sceneTime: 0,
   fpsFrames: 0,
   fpsTime: 0,
 };
@@ -82,11 +106,7 @@ function damp(current, target, lambda, deltaTime) {
 }
 
 function updatePointer(deltaTime) {
-  const reduceMotion = window.matchMedia(
-    "(prefers-reduced-motion: reduce)"
-  ).matches;
-
-  if (reduceMotion) {
+  if (reduceMotion.matches) {
     state.pointer.x = state.pointer.targetX;
     state.pointer.y = state.pointer.targetY;
     state.pointer.velocityX = 0.0;
@@ -124,17 +144,13 @@ function updatePointer(deltaTime) {
   state.pointer.targetVelocityY *= Math.exp(-4.5 * deltaTime);
 }
 
-function updateStatus(deltaTime) {
+function updateFpsIndicator(deltaTime) {
   state.fpsFrames += 1;
   state.fpsTime += deltaTime;
   if (state.fpsTime < 0.5) return;
 
   const fps = state.fpsFrames / state.fpsTime;
-  status.textContent = [
-    `${fps.toFixed(0)} FPS`,
-    "WebGL2",
-    "Liquid Glass + Wake",
-  ].join(" · ");
+  fpsElement.textContent = `${fps.toFixed(0)} FPS`;
 
   state.fpsFrames = 0;
   state.fpsTime = 0;
@@ -149,10 +165,14 @@ function render(now) {
   if (!state.hidden) {
     updatePointer(deltaTime);
 
+    if (!reduceMotion.matches) {
+      state.sceneTime += deltaTime;
+    }
+
     const rect = getGlassRectInCanvasPixels();
     const radius = getGlassRadiusInCanvasPixels();
 
-    renderer.renderFrame(now * 0.001, {
+    renderer.renderFrame(state.sceneTime, {
       width: state.width,
       height: state.height,
       pointer: state.pointer,
@@ -162,7 +182,7 @@ function render(now) {
       glassEnabled: state.glassEnabled,
     });
 
-    updateStatus(deltaTime);
+    updateFpsIndicator(deltaTime);
   }
 
   requestAnimationFrame(render);
@@ -200,19 +220,30 @@ document.addEventListener("visibilitychange", () => {
 canvas.addEventListener("webglcontextlost", (event) => {
   event.preventDefault();
   state.hidden = true;
-  status.textContent = "WebGL context lost";
+  setStatus("Контекст WebGL потерян, ожидается восстановление");
 });
 
 canvas.addEventListener("webglcontextrestored", () => {
   window.location.reload();
 });
 
+function syncRefractionButton() {
+  const enabled = state.glassEnabled > 0.5;
+  testButton.textContent = enabled
+    ? "Выключить рефракцию"
+    : "Включить рефракцию";
+  testButton.setAttribute("aria-pressed", String(enabled));
+}
+
 testButton.addEventListener("click", () => {
   state.glassEnabled = state.glassEnabled > 0.5 ? 0.0 : 1.0;
-  testButton.textContent =
-    state.glassEnabled > 0.5 ? "Выключить рефракцию" : "Включить рефракцию";
+  syncRefractionButton();
 });
 
-resizeCanvas();
-status.textContent = "Liquid Glass + Wake";
-requestAnimationFrame(render);
+syncRefractionButton();
+
+if (renderer) {
+  resizeCanvas();
+  setStatus("Liquid Glass готов");
+  requestAnimationFrame(render);
+}

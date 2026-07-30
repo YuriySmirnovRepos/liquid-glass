@@ -25,7 +25,11 @@
       </section>
     </main>
 
-    <output id="status" class="status" aria-live="polite">
+    <!-- Телеметрия обновляется 2 раза в секунду и не должна попадать
+         в live-регион, иначе скринридер зачитывает её непрерывно. -->
+    <div id="fps" class="badge badge--fps" aria-hidden="true">— FPS</div>
+
+    <output id="status" class="badge badge--status" aria-live="polite">
       Инициализация…
     </output>
 

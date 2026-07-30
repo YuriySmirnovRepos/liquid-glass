@@ -122,9 +122,9 @@ export class LiquidGlassRenderer {
       blur: {
         texture: gl.getUniformLocation(this.blurProgram, "uTexture"),
         direction: gl.getUniformLocation(this.blurProgram, "uDirection"),
-        inputResolution: gl.getUniformLocation(
+        outputResolution: gl.getUniformLocation(
           this.blurProgram,
-          "uInputResolution"
+          "uOutputResolution"
         ),
         strength: gl.getUniformLocation(this.blurProgram, "uStrength"),
       },
@@ -200,7 +200,7 @@ export class LiquidGlassRenderer {
     this.drawFullscreen();
   }
 
-  renderBlurPass(inputTarget, outputTarget, direction) {
+  renderBlurPass(inputTarget, outputTarget, dirX, dirY) {
     const { gl } = this;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, outputTarget.framebuffer);
@@ -215,12 +215,15 @@ export class LiquidGlassRenderer {
 
     gl.uniform1i(this.uniforms.blur.texture, 0);
     gl.uniform2f(
-      this.uniforms.blur.inputResolution,
-      inputTarget.width,
-      inputTarget.height
+      this.uniforms.blur.outputResolution,
+      outputTarget.width,
+      outputTarget.height
     );
-    gl.uniform2f(this.uniforms.blur.direction, direction[0], direction[1]);
-    gl.uniform1f(this.uniforms.blur.strength, 2.15);
+    gl.uniform2f(this.uniforms.blur.direction, dirX, dirY);
+
+    // 9-tap Gaussian за 5 билинейных выборок валиден только при
+    // канонических смещениях, поэтому множитель нейтральный.
+    gl.uniform1f(this.uniforms.blur.strength, 1.0);
 
     this.drawFullscreen();
   }
@@ -282,12 +285,14 @@ export class LiquidGlassRenderer {
     this.renderBlurPass(
       this.backgroundTarget,
       this.blurHorizontalTarget,
-      [1.0, 0.0]
+      1.0,
+      0.0
     );
     this.renderBlurPass(
       this.blurHorizontalTarget,
       this.blurVerticalTarget,
-      [0.0, 1.0]
+      0.0,
+      1.0
     );
     this.renderLiquidGlass(params);
   }

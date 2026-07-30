@@ -11,8 +11,7 @@
 }
 
 html,
-body,
-#app {
+body {
   width: 100%;
   min-width: 320px;
   min-height: 100%;
@@ -20,7 +19,7 @@ body,
 }
 
 body {
-  overflow: hidden;
+  overflow-x: hidden;
   background: #070b15;
 }
 
@@ -39,6 +38,7 @@ body {
   display: grid;
   width: 100%;
   min-height: 100vh;
+  min-height: 100dvh;
   place-items: center;
   padding: 24px;
   pointer-events: none;
@@ -111,10 +111,9 @@ button:focus-visible {
   outline-offset: 3px;
 }
 
-.status {
+.badge {
   position: fixed;
   z-index: 2;
-  top: 16px;
   right: 16px;
   border: 1px solid rgb(255 255 255 / 0.13);
   border-radius: 999px;
@@ -122,4 +121,44 @@ button:focus-visible {
   color: #c4d2eb;
   background: rgb(0 0 0 / 0.32);
   font-size: 0.75rem;
+}
+
+.badge--fps {
+  top: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.badge--status {
+  top: 52px;
+  max-width: min(60vw, 460px);
+}
+
+/*
+ * Деградация без WebGL2: карточка получает обычный CSS-фон,
+ * так как рисовать её стеклянную версию больше некому.
+ */
+.webgl-unavailable #liquid-canvas {
+  display: none;
+}
+
+.webgl-unavailable {
+  background: radial-gradient(
+      circle at 20% 20%,
+      rgb(86 122 255 / 0.4),
+      transparent 55%
+    ),
+    radial-gradient(circle at 80% 70%, rgb(255 96 176 / 0.32), transparent 55%),
+    #070b15;
+}
+
+.webgl-unavailable .glass-card {
+  border: 1px solid rgb(255 255 255 / 0.22);
+  background: rgb(255 255 255 / 0.08);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 0.45);
+  backdrop-filter: blur(18px);
+}
+
+.webgl-unavailable .badge--status {
+  border-color: rgb(255 138 138 / 0.5);
+  color: #ffd7d7;
 }

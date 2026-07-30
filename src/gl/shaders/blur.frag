@@ -5,13 +5,19 @@ in vec2 vUv;
 
 uniform sampler2D uTexture;
 uniform vec2 uDirection;
-uniform vec2 uInputResolution;
+
+/*
+ * Разрешение ЦЕЛИ прохода: шаг тексела должен быть одинаковым
+ * для горизонтального и вертикального проходов, иначе даунсемплящий
+ * проход размывает вдвое слабее и ядро становится анизотропным.
+ */
+uniform vec2 uOutputResolution;
 uniform float uStrength;
 
 out vec4 outColor;
 
 void main() {
-  vec2 texel = 1.0 / uInputResolution;
+  vec2 texel = 1.0 / uOutputResolution;
 
   vec2 offset1 = uDirection
     * texel
