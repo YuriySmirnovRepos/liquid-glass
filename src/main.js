@@ -227,7 +227,7 @@ function updateFpsIndicator(deltaTime) {
   adaptPixelRatio(fps);
 }
 
-function refreshFpsIndicatorMode() {
+function syncFpsIndicatorMode() {
   if (isContinuous()) return;
 
   state.fpsFrames = 0;
@@ -306,25 +306,18 @@ window.addEventListener(
   { passive: true }
 );
 
-window.addEventListener(
-  "resize",
-  () => {
-    invalidateGlassGeometry();
-    requestFrame();
-  },
-  { passive: true }
-);
-
-const glassResizeObserver = new ResizeObserver(() => {
+function handleLayoutChange() {
   invalidateGlassGeometry();
   requestFrame();
-});
+}
 
-glassResizeObserver.observe(glassCard);
+window.addEventListener("resize", handleLayoutChange, { passive: true });
+
+new ResizeObserver(handleLayoutChange).observe(glassCard);
 
 reduceMotion.addEventListener("change", () => {
   state.lastFrameTime = performance.now();
-  refreshFpsIndicatorMode();
+  syncFpsIndicatorMode();
   requestFrame();
 });
 
@@ -383,6 +376,6 @@ syncRefractionButton();
 
 if (!renderingStopped && resizeCanvas(true)) {
   setStatus("Liquid Glass готов");
-  refreshFpsIndicatorMode();
+  syncFpsIndicatorMode();
   requestFrame();
 }
