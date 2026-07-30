@@ -11,6 +11,14 @@ const glassCard = document.querySelector(".glass-card");
 // Живёт на уровне модуля: matchMedia() в каждом кадре — лишняя работа.
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
+const MAX_DPR = 1.5;
+const MIN_DPR = 1.0;
+const DPR_STEP = 0.25;
+
+/* Адаптация dpr: окна телеметрии по 0.5 c, шесть подряд — это 3 секунды */
+const SLOW_FPS = 50;
+const SLOW_WINDOWS_BEFORE_DOWNGRADE = 6;
+
 /*
  * Live-регион: сюда пишутся только значимые события (готовность,
  * потеря/восстановление контекста, ошибки), но не телеметрия.
@@ -47,7 +55,8 @@ try {
 }
 
 const state = {
-  dpr: Math.min(window.devicePixelRatio || 1, 1.5),
+  dprCap: MAX_DPR,
+  dpr: Math.min(window.devicePixelRatio || 1, MAX_DPR),
   width: 0,
   height: 0,
   pointer: {
@@ -68,36 +77,80 @@ const state = {
   sceneTime: 0,
   fpsFrames: 0,
   fpsTime: 0,
+  slowWindows: 0,
 };
 
-function resizeCanvas() {
-  state.dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+/*
+ * Геометрия карточки в CSS-пикселях. Чтение layout стоит дорого,
+ * поэтому кэш обновляется по ResizeObserver и resize окна,
+ * а рендер-цикл только домножает значения на текущий dpr.
+ */
+const glassGeometry = {
+  valid: false,
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  radius: 0,
+};
+
+const frameRect = { x: 0, y: 0, width: 0, height: 0 };
+
+let rafId = 0;
+let renderingStopped = renderer === null;
+
+function measureGlassGeometry() {
+  const rect = glassCard.getBoundingClientRect();
+  const styles = getComputedStyle(glassCard);
+
+  glassGeometry.x = rect.left;
+  glassGeometry.y = window.innerHeight - rect.bottom;
+  glassGeometry.width = rect.width;
+  glassGeometry.height = rect.height;
+  glassGeometry.radius = Number.parseFloat(styles.borderTopLeftRadius) || 0;
+  glassGeometry.valid = true;
+}
+
+function invalidateGlassGeometry() {
+  glassGeometry.valid = false;
+}
+
+function isContinuous() {
+  return !state.hidden && !reduceMotion.matches;
+}
+
+function requestFrame() {
+  if (rafId || renderingStopped) return;
+  rafId = requestAnimationFrame(render);
+}
+
+/*
+ * Единственный источник изменения размера canvas — кадр рендера.
+ * Ранний выход делает вызов дешёвым, поэтому отдельный resize-listener
+ * для canvas не нужен.
+ */
+function resizeCanvas(force = false) {
+  state.dpr = Math.min(window.devicePixelRatio || 1, state.dprCap);
+
   const width = Math.max(1, Math.round(window.innerWidth * state.dpr));
   const height = Math.max(1, Math.round(window.innerHeight * state.dpr));
 
-  if (canvas.width === width && canvas.height === height) return;
+  if (!force && state.width === width && state.height === height) return true;
 
   canvas.width = width;
   canvas.height = height;
   state.width = width;
   state.height = height;
+  invalidateGlassGeometry();
 
-  renderer.resize(width, height);
-}
-
-function getGlassRectInCanvasPixels() {
-  const rect = glassCard.getBoundingClientRect();
-  return {
-    x: rect.left * state.dpr,
-    y: (window.innerHeight - rect.bottom) * state.dpr,
-    width: rect.width * state.dpr,
-    height: rect.height * state.dpr,
-  };
-}
-
-function getGlassRadiusInCanvasPixels() {
-  const styles = getComputedStyle(glassCard);
-  return Number.parseFloat(styles.borderTopLeftRadius) * state.dpr;
+  try {
+    renderer.resize(width, height);
+  } catch (error) {
+    renderingStopped = true;
+    reportFatal(`Не удалось перестроить буферы: ${error.message}`, error);
+    return false;
+  }
+  return true;
 }
 
 function damp(current, target, lambda, deltaTime) {
@@ -144,6 +197,22 @@ function updatePointer(deltaTime) {
   state.pointer.targetVelocityY *= Math.exp(-4.5 * deltaTime);
 }
 
+/*
+ * Гистерезис: понижаем dpr только после нескольких секунд стабильно
+ * низкого FPS и никогда не повышаем обратно, чтобы разрешение
+ * не «дёргалось» туда-сюда.
+ */
+function adaptPixelRatio(fps) {
+  if (state.dpr <= MIN_DPR) return;
+
+  state.slowWindows = fps < SLOW_FPS ? state.slowWindows + 1 : 0;
+  if (state.slowWindows < SLOW_WINDOWS_BEFORE_DOWNGRADE) return;
+
+  state.slowWindows = 0;
+  state.dprCap = Math.max(MIN_DPR, state.dprCap - DPR_STEP);
+  resizeCanvas();
+}
+
 function updateFpsIndicator(deltaTime) {
   state.fpsFrames += 1;
   state.fpsTime += deltaTime;
@@ -154,13 +223,29 @@ function updateFpsIndicator(deltaTime) {
 
   state.fpsFrames = 0;
   state.fpsTime = 0;
+
+  adaptPixelRatio(fps);
+}
+
+function refreshFpsIndicatorMode() {
+  if (isContinuous()) return;
+
+  state.fpsFrames = 0;
+  state.fpsTime = 0;
+  state.slowWindows = 0;
+  fpsElement.textContent = "кадры по запросу";
 }
 
 function render(now) {
+  rafId = 0;
+
+  // Кадр мог быть запланирован до потери контекста или до фатальной ошибки.
+  if (renderingStopped) return;
+
   const deltaTime = Math.min((now - state.lastFrameTime) / 1000, 0.05);
   state.lastFrameTime = now;
 
-  resizeCanvas();
+  if (!resizeCanvas()) return;
 
   if (!state.hidden) {
     updatePointer(deltaTime);
@@ -169,24 +254,32 @@ function render(now) {
       state.sceneTime += deltaTime;
     }
 
-    const rect = getGlassRectInCanvasPixels();
-    const radius = getGlassRadiusInCanvasPixels();
+    if (!glassGeometry.valid) measureGlassGeometry();
+
+    frameRect.x = glassGeometry.x * state.dpr;
+    frameRect.y = glassGeometry.y * state.dpr;
+    frameRect.width = glassGeometry.width * state.dpr;
+    frameRect.height = glassGeometry.height * state.dpr;
 
     renderer.renderFrame(state.sceneTime, {
       width: state.width,
       height: state.height,
       pointer: state.pointer,
-      rect,
-      radius,
+      rect: frameRect,
+      radius: glassGeometry.radius * state.dpr,
       pixelScale: state.dpr,
       refraction: state.refraction,
       glassEnabled: state.glassEnabled,
     });
 
-    updateFpsIndicator(deltaTime);
+    if (isContinuous()) updateFpsIndicator(deltaTime);
   }
 
-  requestAnimationFrame(render);
+  /*
+   * При prefers-reduced-motion анимации нет: следующий кадр рисуется
+   * только по событию, а не крутится вхолостую.
+   */
+  if (isContinuous()) requestFrame();
 }
 
 window.addEventListener(
@@ -207,25 +300,69 @@ window.addEventListener(
     state.pointer.targetX = nextX;
     state.pointer.targetY = nextY;
     state.pointer.lastEventTime = event.timeStamp;
+
+    requestFrame();
   },
   { passive: true }
 );
 
-window.addEventListener("resize", resizeCanvas, { passive: true });
+window.addEventListener(
+  "resize",
+  () => {
+    invalidateGlassGeometry();
+    requestFrame();
+  },
+  { passive: true }
+);
+
+const glassResizeObserver = new ResizeObserver(() => {
+  invalidateGlassGeometry();
+  requestFrame();
+});
+
+glassResizeObserver.observe(glassCard);
+
+reduceMotion.addEventListener("change", () => {
+  state.lastFrameTime = performance.now();
+  refreshFpsIndicatorMode();
+  requestFrame();
+});
 
 document.addEventListener("visibilitychange", () => {
   state.hidden = document.hidden;
   state.lastFrameTime = performance.now();
+  if (!state.hidden) requestFrame();
 });
 
 canvas.addEventListener("webglcontextlost", (event) => {
   event.preventDefault();
-  state.hidden = true;
+  renderingStopped = true;
   setStatus("Контекст WebGL потерян, ожидается восстановление");
 });
 
 canvas.addEventListener("webglcontextrestored", () => {
-  window.location.reload();
+  try {
+    if (renderer) renderer.dispose();
+    renderer = new LiquidGlassRenderer(gl);
+  } catch (error) {
+    reportFatal(
+      `Не удалось восстановить контекст WebGL: ${error.message}`,
+      error
+    );
+    return;
+  }
+
+  renderingStopped = false;
+  state.hidden = document.hidden;
+  state.lastFrameTime = performance.now();
+  state.fpsFrames = 0;
+  state.fpsTime = 0;
+
+  // force: размер не изменился, но render target'ы нужно создать заново.
+  if (!resizeCanvas(true)) return;
+
+  setStatus("Контекст WebGL восстановлен");
+  requestFrame();
 });
 
 function syncRefractionButton() {
@@ -239,12 +376,13 @@ function syncRefractionButton() {
 testButton.addEventListener("click", () => {
   state.glassEnabled = state.glassEnabled > 0.5 ? 0.0 : 1.0;
   syncRefractionButton();
+  requestFrame();
 });
 
 syncRefractionButton();
 
-if (renderer) {
-  resizeCanvas();
+if (!renderingStopped && resizeCanvas(true)) {
   setStatus("Liquid Glass готов");
-  requestAnimationFrame(render);
+  refreshFpsIndicatorMode();
+  requestFrame();
 }
