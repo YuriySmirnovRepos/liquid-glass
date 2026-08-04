@@ -85,19 +85,46 @@ function createRenderTarget(gl, width, height) {
   return { texture, framebuffer, width, height };
 }
 
+/*
+ * Пересоздавать текстуру и framebuffer на каждый resize дорого:
+ * достаточно перезалить storage существующей текстуры, привязка
+ * к framebuffer при этом остаётся валидной.
+ */
+function resizeRenderTarget(gl, target, width, height) {
+  if (!target) return createRenderTarget(gl, width, height);
+  if (target.width === width && target.height === height) return target;
+
+  gl.bindTexture(gl.TEXTURE_2D, target.texture);
+  gl.texImage2D(
+    gl.TEXTURE_2D,
+    0,
+    gl.RGBA8,
+    width,
+    height,
+    0,
+    gl.RGBA,
+    gl.UNSIGNED_BYTE,
+    null
+  );
+  gl.bindTexture(gl.TEXTURE_2D, null);
+
+  target.width = width;
+  target.height = height;
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
+  const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+  if (status !== gl.FRAMEBUFFER_COMPLETE) {
+    throw new Error(`Framebuffer incomplete: 0x${status.toString(16)}`);
+  }
+  return target;
+}
+
 function destroyRenderTarget(gl, target) {
   if (!target) return;
   gl.deleteTexture(target.texture);
   gl.deleteFramebuffer(target.framebuffer);
-}
-
-function clearCurrentFramebuffer(gl) {
-  gl.disable(gl.SCISSOR_TEST);
-  gl.disable(gl.BLEND);
-  gl.disable(gl.DEPTH_TEST);
-  gl.disable(gl.STENCIL_TEST);
-  gl.clearColor(0.0, 0.0, 0.0, 1.0);
-  gl.clear(gl.COLOR_BUFFER_BIT);
 }
 
 export class LiquidGlassRenderer {
@@ -111,6 +138,16 @@ export class LiquidGlassRenderer {
     this.emptyVao = gl.createVertexArray();
     if (!this.emptyVao) throw new Error("Could not create empty VAO");
 
+    /*
+     * Все проходы рисуют fullscreen quad, полностью перекрывающий цель,
+     * поэтому состояние выставляется один раз, а не перед каждым проходом,
+     * а предварительный clear не нужен вовсе.
+     */
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.STENCIL_TEST);
+
     this.uniforms = {
       background: {
         resolution: gl.getUniformLocation(
@@ -122,9 +159,9 @@ export class LiquidGlassRenderer {
       blur: {
         texture: gl.getUniformLocation(this.blurProgram, "uTexture"),
         direction: gl.getUniformLocation(this.blurProgram, "uDirection"),
-        inputResolution: gl.getUniformLocation(
+        outputResolution: gl.getUniformLocation(
           this.blurProgram,
-          "uInputResolution"
+          "uOutputResolution"
         ),
         strength: gl.getUniformLocation(this.blurProgram, "uStrength"),
       },
@@ -142,6 +179,7 @@ export class LiquidGlassRenderer {
         ),
         rect: gl.getUniformLocation(this.glassProgram, "uRect"),
         radius: gl.getUniformLocation(this.glassProgram, "uRadius"),
+        pixelScale: gl.getUniformLocation(this.glassProgram, "uPixelScale"),
         refraction: gl.getUniformLocation(this.glassProgram, "uRefraction"),
         enabled: gl.getUniformLocation(this.glassProgram, "uGlassEnabled"),
       },
@@ -162,17 +200,45 @@ export class LiquidGlassRenderer {
     this.blurVerticalTarget = null;
   }
 
-  resize(width, height) {
+  dispose() {
     const { gl } = this;
     this.destroyTargets();
 
-    this.backgroundTarget = createRenderTarget(gl, width, height);
+    gl.deleteVertexArray(this.emptyVao);
+    gl.deleteProgram(this.backgroundProgram);
+    gl.deleteProgram(this.blurProgram);
+    gl.deleteProgram(this.glassProgram);
+
+    this.emptyVao = null;
+    this.backgroundProgram = null;
+    this.blurProgram = null;
+    this.glassProgram = null;
+  }
+
+  resize(width, height) {
+    const { gl } = this;
 
     const blurWidth = Math.max(1, Math.floor(width * 0.5));
     const blurHeight = Math.max(1, Math.floor(height * 0.5));
 
-    this.blurHorizontalTarget = createRenderTarget(gl, blurWidth, blurHeight);
-    this.blurVerticalTarget = createRenderTarget(gl, blurWidth, blurHeight);
+    this.backgroundTarget = resizeRenderTarget(
+      gl,
+      this.backgroundTarget,
+      width,
+      height
+    );
+    this.blurHorizontalTarget = resizeRenderTarget(
+      gl,
+      this.blurHorizontalTarget,
+      blurWidth,
+      blurHeight
+    );
+    this.blurVerticalTarget = resizeRenderTarget(
+      gl,
+      this.blurVerticalTarget,
+      blurWidth,
+      blurHeight
+    );
   }
 
   drawFullscreen() {
@@ -185,7 +251,6 @@ export class LiquidGlassRenderer {
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
     gl.viewport(0, 0, target.width, target.height);
-    clearCurrentFramebuffer(gl);
 
     gl.useProgram(this.backgroundProgram);
     gl.bindVertexArray(this.emptyVao);
@@ -200,12 +265,11 @@ export class LiquidGlassRenderer {
     this.drawFullscreen();
   }
 
-  renderBlurPass(inputTarget, outputTarget, direction) {
+  renderBlurPass(inputTarget, outputTarget, dirX, dirY) {
     const { gl } = this;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, outputTarget.framebuffer);
     gl.viewport(0, 0, outputTarget.width, outputTarget.height);
-    clearCurrentFramebuffer(gl);
 
     gl.useProgram(this.blurProgram);
     gl.bindVertexArray(this.emptyVao);
@@ -215,12 +279,15 @@ export class LiquidGlassRenderer {
 
     gl.uniform1i(this.uniforms.blur.texture, 0);
     gl.uniform2f(
-      this.uniforms.blur.inputResolution,
-      inputTarget.width,
-      inputTarget.height
+      this.uniforms.blur.outputResolution,
+      outputTarget.width,
+      outputTarget.height
     );
-    gl.uniform2f(this.uniforms.blur.direction, direction[0], direction[1]);
-    gl.uniform1f(this.uniforms.blur.strength, 2.15);
+    gl.uniform2f(this.uniforms.blur.direction, dirX, dirY);
+
+    // 9-tap Gaussian за 5 билинейных выборок валиден только при
+    // канонических смещениях, поэтому множитель нейтральный.
+    gl.uniform1f(this.uniforms.blur.strength, 1.0);
 
     this.drawFullscreen();
   }
@@ -231,6 +298,7 @@ export class LiquidGlassRenderer {
     pointer,
     rect,
     radius,
+    pixelScale,
     refraction,
     glassEnabled,
   }) {
@@ -238,7 +306,6 @@ export class LiquidGlassRenderer {
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, width, height);
-    clearCurrentFramebuffer(gl);
 
     gl.useProgram(this.glassProgram);
     gl.bindVertexArray(this.emptyVao);
@@ -266,6 +333,7 @@ export class LiquidGlassRenderer {
       rect.height
     );
     gl.uniform1f(this.uniforms.glass.radius, radius);
+    gl.uniform1f(this.uniforms.glass.pixelScale, pixelScale);
     gl.uniform1f(this.uniforms.glass.refraction, refraction);
     gl.uniform1f(this.uniforms.glass.enabled, glassEnabled);
 
@@ -282,12 +350,14 @@ export class LiquidGlassRenderer {
     this.renderBlurPass(
       this.backgroundTarget,
       this.blurHorizontalTarget,
-      [1.0, 0.0]
+      1.0,
+      0.0
     );
     this.renderBlurPass(
       this.blurHorizontalTarget,
       this.blurVerticalTarget,
-      [0.0, 1.0]
+      0.0,
+      1.0
     );
     this.renderLiquidGlass(params);
   }
